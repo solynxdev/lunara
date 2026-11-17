@@ -1,0 +1,74 @@
+#!/usr/bin/env fish
+# Boot Lunara in QEMU.
+# Usage: ./scripts/boot [--persistent]
+
+set -l script_dir (path dirname (path resolve (status filename)))
+set -l project_root (path resolve "$script_dir/..")
+set -l build_dir "$project_root/build"
+
+set -l mode ram
+set -l boot_args
+
+if test (count $argv) -gt 1
+    echo "Usage: scripts/boot [--persistent]" >&2
+    exit 2
+end
+
+if test (count $argv) -eq 1
+    switch $argv[1]
+        case --persistent
+            set mode persistent
+        case '*'
+            echo "Unknown argument: $argv[1]" >&2
+            exit 2
+    end
+end
+
+if not command -q qemu-system-x86_64
+    echo "error: qemu-system-x86_64 not installed." >&2
+    exit 1
+end
+
+set -l kernel "$build_dir/vmlinuz-linux"
+
+if not test -s "$kernel"
+    echo "error: cached kernel missing. Run scripts/build first." >&2
+    exit 1
+end
+
+if test "$mode" = persistent
+    set -l initramfs "$build_dir/initramfs-persistent.cpio.gz"
+    set -l disk "$build_dir/lunara-rootfs.img"
+
+    if not test -s "$initramfs"; or not test -s "$disk"
+        echo "error: persistent artifacts missing." >&2
+        exit 1
+    end
+
+    set boot_args \
+        -initrd "$initramfs" \
+        -drive "file=$disk,format=raw,if=virtio" \
+        -append "console=ttyS0,115200n8 rdinit=/init-persistent loglevel=3"
+else
+    set -l initramfs "$build_dir/initramfs.cpio.gz"
+
+    if not test -s "$initramfs"
+        echo "error: initramfs missing. Run scripts/build first." >&2
+        exit 1
+    end
+
+    set boot_args \
+        -initrd "$initramfs" \
+        -append "console=ttyS0,115200n8 rdinit=/init loglevel=3"
+end
+
+echo "==> Booting Lunara ($mode mode)"
+echo "    Ctrl+A, then X to quit QEMU"
+
+qemu-system-x86_64 \
+    -m 256M \
+    -smp 2 \
+    -kernel "$kernel" \
+    $boot_args \
+    -nographic \
+    -no-reboot

@@ -1,0 +1,40 @@
+#!/usr/bin/env fish
+# Check the minimum artifacts needed for a QEMU boot.
+
+set -l script_dir (path dirname (status filename))
+set -l project_root (path resolve "$script_dir/..")
+set -l rootfs "$project_root/rootfs"
+set -l initramfs "$project_root/build/initramfs.cpio.gz"
+
+set -l failed 0
+
+for path_to_check in "$rootfs/init" "$rootfs/bin/busybox" "$initramfs"
+    if test -s "$path_to_check"
+        echo "ok   $path_to_check"
+    else
+        echo "MISS $path_to_check"
+        set failed 1
+    end
+end
+
+if test -x "$rootfs/init"
+    echo "ok   rootfs/init is executable"
+else
+    echo "MISS rootfs/init is not executable"
+    set failed 1
+end
+
+if test -s "$initramfs"
+    if gzip -t "$initramfs" >/dev/null 2>&1
+        echo "ok   initramfs gzip integrity"
+    else
+        echo "FAIL initramfs gzip integrity"
+        set failed 1
+    end
+end
+
+if test $failed -ne 0
+    exit 1
+end
+
+echo "all checks passed"

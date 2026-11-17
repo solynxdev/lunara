@@ -1,0 +1,44 @@
+/build/*
+!/build/.gitkeep
+
+# persistent rootfs
+/diskroot/*
+!/diskroot/.gitkeep
+
+# generated rootfs
+/rootfs/bin/
+/rootfs/sbin/
+/rootfs/usr/
+/rootfs/dev/
+/rootfs/proc/
+/rootfs/sys/
+/rootfs/tmp/
+
+# generated initramfs, kernel, disk imgs
+*.cpio
+*.cpio.gz
+*.img
+*.iso
+*.qcow2
+*.raw
+*.vmlinuz
+
+# src trees
+*-src/
+/vendor/
+
+# logs and temp
+*.log
+*.tmp
+*.swp
+*.bak
+*~
+
+# ide
+.vscode/
+.idea/
+*.code-workspace
+
+# other
+.DS_Store
+Thumbs.db

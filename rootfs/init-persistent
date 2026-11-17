@@ -1,0 +1,30 @@
+#!/bin/sh
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+mkdir -p /newroot
+
+i=0
+while [ ! -b /dev/vda ] && [ "$i" -lt 10 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ ! -b /dev/vda ]; then
+    echo "ERROR: persistent disk /dev/vda not found"
+    exec /bin/cttyhack /bin/sh
+fi
+
+if ! mount -t ext4 /dev/vda /newroot; then
+    echo "ERROR: failed to mount persistent root"
+    exec /bin/cttyhack /bin/sh
+fi
+
+mkdir -p /newroot/dev /newroot/proc /newroot/sys
+mount --move /dev /newroot/dev
+mount --move /proc /newroot/proc
+mount --move /sys /newroot/sys
+
+echo "Switching to persistent root..."
+exec /bin/busybox switch_root /newroot /sbin/init

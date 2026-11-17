@@ -1,0 +1,76 @@
+#!/usr/bin/env fish
+# Build Lunara's BusyBox initramfs and cache the host kernel.
+
+set -l script_dir (path dirname (path resolve (status filename)))
+set -l project_root (path resolve "$script_dir/..")
+set -l build_dir "$project_root/build"
+set -l rootfs "$project_root/rootfs"
+set -l busybox_src "$build_dir/busybox-src"
+
+set -l kernel_version (uname -r)
+set -l kernel_source "/usr/lib/modules/$kernel_version/vmlinuz"
+set -l kernel_copy "$build_dir/vmlinuz-linux"
+
+# Check dependencies.
+for cmd in make cpio gzip find nproc
+    if not command -q "$cmd"
+        echo "error: required command '$cmd' not found." >&2
+        exit 1
+    end
+end
+
+if not test -f "$busybox_src/Makefile"
+    echo "error: BusyBox source not found at $busybox_src" >&2
+    exit 1
+end
+
+if not test -d "$rootfs"
+    echo "error: rootfs directory not found." >&2
+    exit 1
+end
+
+mkdir -p "$build_dir"
+
+# Compile BusyBox.
+echo "==> Compiling BusyBox"
+cd "$busybox_src"
+or exit 1
+
+make -j(nproc)
+or exit 1
+
+# Install BusyBox into the initramfs root.
+echo "==> Installing BusyBox"
+make CONFIG_PREFIX="$rootfs" install
+or exit 1
+
+# Ensure the init script is executable.
+if not test -f "$rootfs/init"
+    echo "error: rootfs/init is missing." >&2
+    exit 1
+end
+
+chmod +x "$rootfs/init"
+
+# Package initramfs from its root.
+echo "==> Creating initramfs"
+cd "$rootfs"
+or exit 1
+
+find . -print0 | cpio --null -o -H newc --owner=0:0 | gzip -9 > "$build_dir/initramfs.cpio.gz"
+or exit 1
+
+# Cache the kernel. This is the only step requiring sudo.
+echo "==> Updating cached kernel"
+if not test -r "$kernel_source"
+    echo "error: kernel not found at $kernel_source" >&2
+    exit 1
+end
+
+install -m 644 "$kernel_source" "$kernel_copy"
+or exit 1
+
+echo
+echo "==> Build complete"
+echo "    Kernel:    $kernel_copy"
+echo "    Initramfs: $build_dir/initramfs.cpio.gz"

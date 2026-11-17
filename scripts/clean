@@ -1,0 +1,10 @@
+#!/usr/bin/env fish
+# Remove generated artifacts without touching source or rootfs contents.
+
+set -l script_dir (path dirname (status filename))
+set -l project_root (path resolve "$script_dir/..")
+set -l build_dir "$project_root/build"
+
+rm -f "$build_dir/initramfs.cpio.gz"
+echo "removed build/initramfs.cpio.gz"
+echo "kept BusyBox source/config, rootfs, and cached kernel"
