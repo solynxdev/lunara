@@ -1,74 +1,149 @@
-#!/usr/bin/env fish
+#!/usr/bin/env bash
 # Boot Lunara in QEMU.
-# Usage: ./scripts/boot [--persistent]
+#
+# Usage:
+#   scripts/boot
+#   scripts/boot --persistent
 
-set -l script_dir (path dirname (path resolve (status filename)))
-set -l project_root (path resolve "$script_dir/..")
-set -l build_dir "$project_root/build"
+set -euo pipefail
 
-set -l mode ram
-set -l boot_args
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-if test (count $argv) -gt 1
+BUILD_DIR="$PROJECT_ROOT/build"
+VERSION_FILE="$PROJECT_ROOT/config/kernel/version"
+DISKROOT="$PROJECT_ROOT/diskroot"
+
+MODE="ram"
+
+if [[ $# -gt 1 ]]; then
     echo "Usage: scripts/boot [--persistent]" >&2
     exit 2
-end
+fi
 
-if test (count $argv) -eq 1
-    switch $argv[1]
-        case --persistent
-            set mode persistent
-        case '*'
-            echo "Unknown argument: $argv[1]" >&2
+if [[ $# -eq 1 ]]; then
+    case "$1" in
+        --persistent) MODE="persistent" ;;
+        *)
+            echo "error: unknown argument: $1" >&2
             exit 2
-    end
-end
+            ;;
+    esac
+fi
 
-if not command -q qemu-system-x86_64
-    echo "error: qemu-system-x86_64 not installed." >&2
-    exit 1
-end
-
-set -l kernel "$build_dir/vmlinuz-linux"
-
-if not test -s "$kernel"
-    echo "error: cached kernel missing. Run scripts/build first." >&2
-    exit 1
-end
-
-if test "$mode" = persistent
-    set -l initramfs "$build_dir/initramfs-persistent.cpio.gz"
-    set -l disk "$build_dir/lunara-rootfs.img"
-
-    if not test -s "$initramfs"; or not test -s "$disk"
-        echo "error: persistent artifacts missing." >&2
+for cmd in qemu-system-x86_64 realpath sync; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "error: required command '$cmd' not found." >&2
         exit 1
-    end
+    }
+done
 
-    set boot_args \
-        -initrd "$initramfs" \
-        -drive "file=$disk,format=raw,if=virtio" \
+[[ -s "$VERSION_FILE" ]] || {
+    echo "error: kernel version file missing." >&2
+    exit 1
+}
+
+KERNEL_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+KERNEL="$BUILD_DIR/kernel/$KERNEL_VERSION/vmlinuz"
+
+[[ -s "$KERNEL" ]] || {
+    echo "error: Lunara kernel missing: $KERNEL" >&2
+    echo "Run scripts/build-kernel first." >&2
+    exit 1
+}
+
+QEMU_ARGS=(
+    -m 256M
+    -smp 2
+    -kernel "$KERNEL"
+    -nographic
+    -no-reboot
+)
+
+if [[ "$MODE" == "persistent" ]]; then
+    INITRAMFS="$BUILD_DIR/initramfs-persistent.cpio.gz"
+    DISK="$(realpath -e "$BUILD_DIR/lunara-rootfs.img")"
+
+    [[ -s "$INITRAMFS" ]] || {
+        echo "error: persistent initramfs missing." >&2
+        echo "Run scripts/build --persistent first." >&2
+        exit 1
+    }
+
+    [[ -s "$DISK" ]] || {
+        echo "error: persistent disk image missing." >&2
+        exit 1
+    }
+
+    # Ensure the host isn't accessing the image while QEMU runs.
+    if mountpoint -q "$DISKROOT"; then
+        MOUNT_SOURCE="$(findmnt -n -o SOURCE --target "$DISKROOT")"
+        BACKING_FILE="$(sudo losetup -n -O BACK-FILE "$MOUNT_SOURCE")"
+
+        if [[ "$(realpath -e "$BACKING_FILE")" != "$DISK" ]]; then
+            echo "error: diskroot is mounted from a different image." >&2
+            exit 1
+        fi
+
+        echo "==> Unmounting persistent root from host"
+        sudo umount "$DISKROOT"
+    fi
+
+    # Refuse to boot if the image is mounted elsewhere.
+    while IFS=: read -r LOOP_DEVICE _; do
+        [[ -n "$LOOP_DEVICE" ]] || continue
+
+        if findmnt -rn -S "$LOOP_DEVICE" >/dev/null; then
+            echo "error: persistent image is mounted through $LOOP_DEVICE elsewhere." >&2
+            exit 1
+        fi
+    done < <(sudo losetup -j "$DISK")
+
+    QEMU_ARGS+=(
+        -initrd "$INITRAMFS"
+        -drive "file=$DISK,format=raw,if=virtio"
         -append "console=ttyS0,115200n8 rdinit=/init-persistent loglevel=3"
+    )
 else
-    set -l initramfs "$build_dir/initramfs.cpio.gz"
+    INITRAMFS="$BUILD_DIR/initramfs.cpio.gz"
 
-    if not test -s "$initramfs"
+    [[ -s "$INITRAMFS" ]] || {
         echo "error: initramfs missing. Run scripts/build first." >&2
         exit 1
-    end
+    }
 
-    set boot_args \
-        -initrd "$initramfs" \
+    QEMU_ARGS+=(
+        -initrd "$INITRAMFS"
         -append "console=ttyS0,115200n8 rdinit=/init loglevel=3"
-end
+    )
+fi
 
-echo "==> Booting Lunara ($mode mode)"
-echo "    Ctrl+A, then X to quit QEMU"
+echo "==> Booting Lunara ($MODE mode)"
+echo "    Kernel: $KERNEL"
 
-qemu-system-x86_64 \
-    -m 256M \
-    -smp 2 \
-    -kernel "$kernel" \
-    $boot_args \
-    -nographic \
-    -no-reboot
+if [[ "$MODE" == "persistent" ]]; then
+    echo "    Disk:   $DISK"
+fi
+
+echo
+echo "    Guest shutdown: run 'poweroff' inside Lunara"
+echo "    QEMU exit:      Ctrl+A, then X"
+echo
+
+# Preserve QEMU's exit status while still flushing host writes.
+set +e
+qemu-system-x86_64 "${QEMU_ARGS[@]}"
+QEMU_STATUS=$?
+set -e
+
+sync
+
+echo
+echo "==> QEMU exited (status $QEMU_STATUS)"
+
+if [[ "$MODE" == "persistent" ]]; then
+    echo "    The disk image is no longer in use."
+    echo "    You can safely mount diskroot again."
+fi
+
+exit "$QEMU_STATUS"

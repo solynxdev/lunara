@@ -1,76 +1,121 @@
-#!/usr/bin/env fish
-# Build Lunara's BusyBox initramfs and cache the host kernel.
+#!/usr/bin/env bash
+# Build Lunara initramfs images.
+#
+# Usage:
+#   scripts/build              Build RAM initramfs
+#   scripts/build --persistent Build persistent-root initramfs
 
-set -l script_dir (path dirname (path resolve (status filename)))
-set -l project_root (path resolve "$script_dir/..")
-set -l build_dir "$project_root/build"
-set -l rootfs "$project_root/rootfs"
-set -l busybox_src "$build_dir/busybox-src"
+set -euo pipefail
 
-set -l kernel_version (uname -r)
-set -l kernel_source "/usr/lib/modules/$kernel_version/vmlinuz"
-set -l kernel_copy "$build_dir/vmlinuz-linux"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-# Check dependencies.
-for cmd in make cpio gzip find nproc
-    if not command -q "$cmd"
+BUILD_DIR="$PROJECT_ROOT/build"
+ROOTFS="$PROJECT_ROOT/rootfs"
+STAGING="$BUILD_DIR/userspace"
+
+MODE="ram"
+
+if [[ $# -gt 1 ]]; then
+    echo "Usage: scripts/build [--persistent]" >&2
+    exit 2
+fi
+
+if [[ $# -eq 1 ]]; then
+    case "$1" in
+        --persistent)
+            MODE="persistent"
+            ;;
+        *)
+            echo "error: unknown argument: $1" >&2
+            echo "Usage: scripts/build [--persistent]" >&2
+            exit 2
+            ;;
+    esac
+fi
+
+case "$MODE" in
+    ram)
+        INIT="$ROOTFS/init"
+        OUTPUT="$BUILD_DIR/initramfs.cpio.gz"
+        ;;
+    persistent)
+        INIT="$ROOTFS/init-persistent"
+        OUTPUT="$BUILD_DIR/initramfs-persistent.cpio.gz"
+        ;;
+esac
+
+for cmd in bash cpio find gzip mktemp cp du; do
+    command -v "$cmd" >/dev/null 2>&1 || {
         echo "error: required command '$cmd' not found." >&2
         exit 1
-    end
-end
+    }
+done
 
-if not test -f "$busybox_src/Makefile"
-    echo "error: BusyBox source not found at $busybox_src" >&2
+[[ -d "$ROOTFS" ]] || {
+    echo "error: initramfs root directory missing: $ROOTFS" >&2
     exit 1
-end
+}
 
-if not test -d "$rootfs"
-    echo "error: rootfs directory not found." >&2
+[[ -f "$INIT" ]] || {
+    echo "error: init script missing: $INIT" >&2
     exit 1
-end
+}
 
-mkdir -p "$build_dir"
+mkdir -p "$BUILD_DIR"
 
-# Compile BusyBox.
-echo "==> Compiling BusyBox"
-cd "$busybox_src"
-or exit 1
+echo "==> Building userspace"
+bash "$SCRIPT_DIR/build-userspace"
 
-make -j(nproc)
-or exit 1
-
-# Install BusyBox into the initramfs root.
-echo "==> Installing BusyBox"
-make CONFIG_PREFIX="$rootfs" install
-or exit 1
-
-# Ensure the init script is executable.
-if not test -f "$rootfs/init"
-    echo "error: rootfs/init is missing." >&2
+[[ -x "$STAGING/bin/busybox" ]] || {
+    echo "error: staged BusyBox binary missing." >&2
     exit 1
-end
+}
 
-chmod +x "$rootfs/init"
+echo "==> Assembling $MODE initramfs"
 
-# Package initramfs from its root.
-echo "==> Creating initramfs"
-cd "$rootfs"
-or exit 1
+TEMP_ROOT="$(mktemp -d "$BUILD_DIR/.initramfs.XXXXXX")"
+TEMP_OUTPUT="$BUILD_DIR/.initramfs.cpio.gz.tmp"
 
-find . -print0 | cpio --null -o -H newc --owner=0:0 | gzip -9 > "$build_dir/initramfs.cpio.gz"
-or exit 1
+cleanup() {
+    rm -rf -- "$TEMP_ROOT"
+    rm -f -- "$TEMP_OUTPUT"
+}
+trap cleanup EXIT
 
-# Cache the kernel. This is the only step requiring sudo.
-echo "==> Updating cached kernel"
-if not test -r "$kernel_source"
-    echo "error: kernel not found at $kernel_source" >&2
-    exit 1
-end
+# Copy initramfs files, excluding host device nodes.
+(
+    cd "$ROOTFS"
+    find . -mindepth 1 -maxdepth 1 ! -name dev \
+        -exec cp -a -- {} "$TEMP_ROOT/" \;
+)
 
-install -m 644 "$kernel_source" "$kernel_copy"
-or exit 1
+# devtmpfs supplies device nodes at boot.
+mkdir -p "$TEMP_ROOT/dev"
+
+# Overlay the compiled BusyBox userspace.
+cp -a "$STAGING/." "$TEMP_ROOT/"
+
+# Select the correct init entry point.
+if [[ "$MODE" == "persistent" ]]; then
+    install -m 0755 "$INIT" "$TEMP_ROOT/init-persistent"
+else
+    install -m 0755 "$INIT" "$TEMP_ROOT/init"
+fi
+
+echo "==> Creating compressed archive"
+
+(
+    cd "$TEMP_ROOT"
+    find . -print0 |
+        cpio --null -o -H newc --owner=0:0 |
+        gzip -9
+) > "$TEMP_OUTPUT"
+
+mv -f -- "$TEMP_OUTPUT" "$OUTPUT"
 
 echo
 echo "==> Build complete"
-echo "    Kernel:    $kernel_copy"
-echo "    Initramfs: $build_dir/initramfs.cpio.gz"
+echo "    Mode:       $MODE"
+echo "    Initramfs:  $OUTPUT"
+echo "    Size:       $(du -h "$OUTPUT" | cut -f1)"

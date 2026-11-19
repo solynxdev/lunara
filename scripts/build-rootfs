@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Build Lunara's persistent root filesystem.
+#
+# Usage: scripts/build-rootfs
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+BUILD_DIR="$PROJECT_ROOT/build"
+DISKROOT="$PROJECT_ROOT/diskroot"
+IMAGE="$BUILD_DIR/lunara-rootfs.img"
+STAGING="$BUILD_DIR/userspace"
+
+for cmd in bash findmnt mountpoint losetup realpath rsync install mount; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "error: required command '$cmd' not found." >&2
+        exit 1
+    }
+done
+
+[[ -s "$IMAGE" ]] || {
+    echo "error: root filesystem image missing: $IMAGE" >&2
+    exit 1
+}
+
+mkdir -p "$DISKROOT"
+
+IMAGE="$(realpath -e "$IMAGE")"
+
+# Mount the image if it isn't already mounted.
+if ! mountpoint -q "$DISKROOT"; then
+    echo "==> Mounting persistent root image"
+    sudo mount -o loop "$IMAGE" "$DISKROOT"
+fi
+
+# Verify the mounted filesystem.
+FSTYPE="$(findmnt -n -o FSTYPE --target "$DISKROOT")"
+SOURCE="$(findmnt -n -o SOURCE --target "$DISKROOT")"
+
+[[ "$FSTYPE" == "ext4" ]] || {
+    echo "error: expected ext4, found $FSTYPE." >&2
+    exit 1
+}
+
+[[ -b "$SOURCE" ]] || {
+    echo "error: mount source is not a block device: $SOURCE" >&2
+    exit 1
+}
+
+BACKING_FILE="$(sudo losetup -n -O BACK-FILE "$SOURCE")"
+
+[[ "$(realpath -e "$BACKING_FILE")" == "$IMAGE" ]] || {
+    echo "error: diskroot is mounted from a different image." >&2
+    echo "       mounted backing file: $BACKING_FILE" >&2
+    exit 1
+}
+
+# Preserve the existing PID 1.
+[[ -x "$DISKROOT/sbin/init" ]] || {
+    echo "error: existing $DISKROOT/sbin/init is missing or not executable." >&2
+    exit 1
+}
+
+echo "==> Building userspace"
+bash "$SCRIPT_DIR/build-userspace"
+
+[[ -x "$STAGING/bin/busybox" ]] || {
+    echo "error: staged BusyBox binary missing." >&2
+    exit 1
+}
+
+echo "==> Populating persistent root"
+
+sudo rsync -a \
+    --chown=0:0 \
+    --exclude='/sbin/init' \
+    "$STAGING/" "$DISKROOT/"
+
+echo "==> Creating filesystem directories"
+
+sudo install -d -o root -g root -m 0755 \
+    "$DISKROOT/dev" \
+    "$DISKROOT/proc" \
+    "$DISKROOT/sys" \
+    "$DISKROOT/run" \
+    "$DISKROOT/etc" \
+    "$DISKROOT/usr/local" \
+    "$DISKROOT/var" \
+    "$DISKROOT/var/log" \
+    "$DISKROOT/home" \
+    "$DISKROOT/mnt" \
+    "$DISKROOT/media" \
+    "$DISKROOT/opt"
+
+sudo install -d -o root -g root -m 0700 "$DISKROOT/root"
+sudo install -d -o root -g root -m 1777 "$DISKROOT/tmp"
+
+[[ -x "$DISKROOT/bin/busybox" ]] || {
+    echo "error: BusyBox installation failed." >&2
+    exit 1
+}
+
+[[ -x "$DISKROOT/sbin/init" ]] || {
+    echo "error: existing init was lost." >&2
+    exit 1
+}
+
+echo
+echo "==> Persistent root populated"
+echo "    Image:   $IMAGE"
+echo "    Mount:   $DISKROOT"
+echo "    BusyBox: $DISKROOT/bin/busybox"
+echo "    Init:    preserved"
+echo
+echo "    Filesystem remains mounted for inspection."

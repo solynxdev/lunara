@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Build Lunara's Linux kernel and stage its modules.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+VERSION_FILE="$PROJECT_ROOT/config/kernel/version"
+CONFIG_FILE="$PROJECT_ROOT/config/kernel/lunara.config"
+
+BUILD_DIR="$PROJECT_ROOT/build"
+SOURCE_PARENT="$BUILD_DIR/kernel-src"
+OUTPUT_DIR="$BUILD_DIR/kernel-build"
+ARTIFACT_DIR="$BUILD_DIR/kernel"
+
+if [[ ! -s "$VERSION_FILE" || ! -s "$CONFIG_FILE" ]]; then
+    echo "error: kernel version or config missing." >&2
+    exit 1
+fi
+
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+SOURCE_DIR="$SOURCE_PARENT/linux-$VERSION"
+ARTIFACT_VERSION_DIR="$ARTIFACT_DIR/$VERSION"
+
+for cmd in make install depmod; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "error: required command '$cmd' not found." >&2
+        exit 1
+    fi
+done
+
+if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
+    echo "error: kernel source missing. Run scripts/bootstrap first." >&2
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR" "$ARTIFACT_VERSION_DIR"
+
+echo "==> Configuring Linux $VERSION"
+
+cp "$CONFIG_FILE" "$OUTPUT_DIR/.config"
+
+make -C "$SOURCE_DIR" \
+    O="$OUTPUT_DIR" \
+    ARCH=x86_64 \
+    olddefconfig
+
+cp "$OUTPUT_DIR/.config" "$CONFIG_FILE"
+
+echo "==> Building kernel and modules"
+
+make -C "$SOURCE_DIR" \
+    O="$OUTPUT_DIR" \
+    ARCH=x86_64 \
+    -j"$(nproc)" \
+    bzImage modules
+
+echo "==> Staging kernel"
+
+install -Dm644 \
+    "$OUTPUT_DIR/arch/x86/boot/bzImage" \
+    "$ARTIFACT_VERSION_DIR/vmlinuz"
+
+install -Dm644 \
+    "$OUTPUT_DIR/System.map" \
+    "$ARTIFACT_VERSION_DIR/System.map"
+
+install -Dm644 \
+    "$OUTPUT_DIR/.config" \
+    "$ARTIFACT_VERSION_DIR/config"
+
+echo "==> Installing modules"
+
+make -C "$SOURCE_DIR" \
+    O="$OUTPUT_DIR" \
+    ARCH=x86_64 \
+    INSTALL_MOD_PATH="$ARTIFACT_VERSION_DIR/modules" \
+    modules_install
+
+echo "==> Generating module dependency metadata"
+
+depmod -b "$ARTIFACT_VERSION_DIR/modules" "$VERSION"
+
+echo
+echo "==> Kernel build complete"
+echo "    Version: $VERSION"
+echo "    Kernel:  $ARTIFACT_VERSION_DIR/vmlinuz"
+echo "    Modules: $ARTIFACT_VERSION_DIR/modules"

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Build and stage Lunara's BusyBox userspace.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+BUILD_DIR="$PROJECT_ROOT/build"
+SOURCE_DIR="$BUILD_DIR/busybox-src"
+CONFIG="$PROJECT_ROOT/config/busybox.config"
+STAGING="$BUILD_DIR/userspace"
+
+for cmd in make install nproc; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "error: required command '$cmd' not found." >&2
+        exit 1
+    }
+done
+
+[[ -f "$SOURCE_DIR/Makefile" ]] || {
+    echo "error: BusyBox source missing: $SOURCE_DIR" >&2
+    exit 1
+}
+
+[[ -s "$CONFIG" ]] || {
+    echo "error: BusyBox config missing: $CONFIG" >&2
+    exit 1
+}
+
+echo "==> Configuring BusyBox"
+cp "$CONFIG" "$SOURCE_DIR/.config"
+
+make -C "$SOURCE_DIR" oldconfig </dev/null
+
+echo "==> Compiling BusyBox"
+make -C "$SOURCE_DIR" -j"$(nproc)"
+
+echo "==> Installing BusyBox into staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+
+make -C "$SOURCE_DIR" CONFIG_PREFIX="$STAGING" install
+
+echo
+echo "==> Userspace build complete"
+echo "    Staging: $STAGING"

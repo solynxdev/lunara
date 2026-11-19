@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Download and prepare the pinned Linux kernel source.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+VERSION_FILE="$PROJECT_ROOT/config/kernel/version"
+CHECKSUM_FILE="$PROJECT_ROOT/config/kernel/sha256"
+
+BUILD_DIR="$PROJECT_ROOT/build"
+SOURCE_PARENT="$BUILD_DIR/kernel-src"
+DIST_DIR="$BUILD_DIR/distfiles"
+
+for cmd in curl sha256sum tar; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "error: required command '$cmd' not found." >&2
+        exit 1
+    fi
+done
+
+if [[ ! -s "$VERSION_FILE" || ! -s "$CHECKSUM_FILE" ]]; then
+    echo "error: kernel version or checksum missing." >&2
+    exit 1
+fi
+
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+CHECKSUM="$(tr -d '[:space:]' < "$CHECKSUM_FILE")"
+
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "error: invalid kernel version: $VERSION" >&2
+    exit 1
+fi
+
+if [[ ! "$CHECKSUM" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: invalid SHA-256 checksum." >&2
+    exit 1
+fi
+
+ARCHIVE_NAME="linux-$VERSION.tar.xz"
+ARCHIVE="$DIST_DIR/$ARCHIVE_NAME"
+SOURCE_DIR="$SOURCE_PARENT/linux-$VERSION"
+URL="https://cdn.kernel.org/pub/linux/kernel/v7.x/$ARCHIVE_NAME"
+
+mkdir -p "$DIST_DIR" "$SOURCE_PARENT"
+
+if [[ ! -s "$ARCHIVE" ]]; then
+    echo "==> Downloading Linux $VERSION"
+    curl --fail --location --retry 3 \
+        --output "$ARCHIVE" "$URL"
+fi
+
+echo "==> Verifying source archive"
+printf '%s  %s\n' "$CHECKSUM" "$ARCHIVE" | sha256sum --check --status || {
+    echo "error: kernel source checksum mismatch." >&2
+    rm -f "$ARCHIVE"
+    exit 1
+}
+
+if [[ -f "$SOURCE_DIR/Makefile" ]]; then
+    echo "==> Kernel source already extracted"
+else
+    echo "==> Extracting kernel source"
+    tar -xJf "$ARCHIVE" -C "$SOURCE_PARENT"
+fi
+
+echo
+echo "==> Bootstrap complete"
+echo "    Version: $VERSION"
+echo "    Source:  $SOURCE_DIR"

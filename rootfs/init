@@ -3,6 +3,7 @@ mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 
+# boot msg
 echo "Welcome to Lunara!"
 
 while true; do
